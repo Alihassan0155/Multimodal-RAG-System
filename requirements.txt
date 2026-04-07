@@ -1,0 +1,11 @@
+pdfplumber
+pymupdf
+python-dotenv
+langchain-text-splitters
+tiktoken
+chromadb
+sentence-transformers
+rank-bm25
+camelot-py[cv]
+opencv-python
+ghostscript
