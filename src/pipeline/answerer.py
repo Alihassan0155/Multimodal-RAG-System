@@ -479,8 +479,11 @@ load_dotenv()
 #   - Speed difference on Groq between 8b and 70b is small (LPU advantage)
 # ─────────────────────────────────────────────────────────────────────────────
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-MODEL  = "llama-3.3-70b-versatile"
+MODEL = "llama-3.3-70b-versatile"
+
+
+def _groq() -> Groq:
+    return Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -618,7 +621,7 @@ def expand_query(query: str) -> list[str]:
     print(f"\n  [Expansion] Generating 4 variants for: '{query}'")
 
     try:
-        response = client.chat.completions.create(
+        response = _groq().chat.completions.create(
             model=MODEL,
             messages=[
                 {
@@ -738,13 +741,56 @@ If the context does not support a complete answer, state exactly what is and is 
 Write "None" if the excerpts fully answer the question.]"""
 
 
+def _classify_chunk(content: str) -> str:
+    """
+    Classifies a chunk into one of four semantic categories:
+      equation   — contains a mathematical formula or symbolic expression
+      definition — introduces or defines a concept
+      example    — illustrates with a concrete case
+      mechanism  — describes a process, architecture, or how something works
+
+    Used to label chunks in the context block so the LLM knows what kind
+    of information each chunk provides and can synthesise accordingly.
+    """
+    import re
+    cl = content.lower()
+
+    # Equation: math symbols + operators together signal a formula chunk
+    math_tokens = [
+        "softmax(", "attention(", "q, k, v", "= softmax", "sqrt(",
+        "argmax", "log p(", "∑", "∫", "∂", "·", "^t", "/ sqrt",
+        "mathrm", "mathbf", "times d_k", "d_{k}", "d_k",
+    ]
+    has_math_token   = any(t in cl for t in math_tokens)
+    operator_density = len(re.findall(r"[=+\-*/÷×√∑∫]", content))
+    if has_math_token or operator_density >= 4:
+        return "equation"
+
+    # Definition: language that introduces or defines a concept
+    def_signals = [
+        "is defined as", "we define", "refers to", "is a model",
+        "is an attention", "introduced in", "can be described as",
+        "consists of", "is composed of", "is based on", "we propose",
+        "the transformer", "is a sequence", "is a function",
+    ]
+    if any(s in cl for s in def_signals):
+        return "definition"
+
+    # Example: illustrative / comparative language
+    if any(s in cl for s in ["for example", "e.g.", "such as", "consider the",
+                              "illustrat", "analogous", "in contrast"]):
+        return "example"
+
+    return "mechanism"
+
+
 def build_context_block(chunks: list[dict]) -> tuple[str, str]:
     """
-    Builds the numbered context block passed to the answering LLM.
+    Formats retrieved chunks into a labeled context block.
 
-    Numbers each excerpt so the model can cite precisely:
-    [Excerpt 1 | Source: paper.pdf, page 2]
-    instead of hallucinating page numbers from memory.
+    Each chunk is tagged with its semantic type (equation / definition /
+    mechanism / example) so the LLM understands what kind of information
+    it is reading and can synthesise across types, not just the same type.
     """
     if not chunks:
         return "", "⚠ WEAK CONTEXT: No relevant chunks were retrieved."
@@ -753,48 +799,204 @@ def build_context_block(chunks: list[dict]) -> tuple[str, str]:
     top_score = chunks[0].get("rerank_score", 0)
 
     for i, chunk in enumerate(chunks, 1):
-        score   = round(chunk.get("rerank_score", 0), 2)
-        source  = chunk.get("source", "unknown")
-        page    = chunk.get("page", "?")
-        content = chunk.get("content", "").strip()
+        score       = round(chunk.get("rerank_score", 0), 2)
+        source      = chunk.get("source", "unknown")
+        page        = chunk.get("page", "?")
+        heading     = chunk.get("heading", "")
+        content     = chunk.get("content", "").strip()
+        chunk_type  = _classify_chunk(content)
 
-        lines.append(
-            f"[Excerpt {i}] Source: {source}, Page {page} | "
-            f"Relevance score: {score}\n"
-            f"{content}"
-        )
+        header = f"[CHUNK {i} | TYPE: {chunk_type} | Page {page}"
+        if heading:
+            header += f" | Section: {heading[:60]}"
+        header += f" | Score: {score}]"
+
+        lines.append(f"{header}\n{content}")
 
     context_block = "\n\n---\n\n".join(lines)
 
-    # Quality signal calibrates model confidence
+    # Programmatic quality signal based on top rerank score
     if top_score >= 3.0:
-        quality = "✅ STRONG: Top excerpts are highly relevant. Answer with HIGH confidence where supported."
+        quality = "STRONG"
     elif top_score >= 0.0:
-        quality = "⚠ MODERATE: Excerpts partially relevant. Use MEDIUM confidence and note gaps explicitly."
+        quality = "MODERATE"
     else:
-        quality = "❌ WEAK: Low relevance scores. Use LOW confidence. Prioritise transparency over completeness."
+        quality = "WEAK"
 
     return context_block, quality
 
 
-def answer(query: str, chunks: list[dict]) -> str:
+# ─────────────────────────────────────────────────────────────────────────────
+# SYNTHESIS PROMPT  (explanation intent — research-grade output)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SYNTHESIS_SYSTEM = """You are a high-precision RAG answer generator.
+
+Your job is to produce consistent, well-structured, research-grade answers from retrieved
+documents while maintaining flexibility across different question types.
+
+SYNTHESIS RULES:
+- Read ALL chunks collectively before writing — produce ONE unified explanation
+- Do NOT copy sentences verbatim — synthesize and paraphrase
+- Do NOT reference chunk numbers or say "according to chunk X"
+- If partial info exists, use it — never say "not enough information"
+- Merge overlapping ideas from multiple chunks into single explanations
+- Remove redundancy aggressively
+
+STANDARD ANSWER FLOW (follow this logical order, skip irrelevant sections silently):
+  Definition → Mechanism → Key Points → Formula → Intuition → Importance
+
+FLEXIBILITY RULE:
+- NOT every section must appear in every answer
+- DO NOT write "not applicable" for skipped sections — just omit them
+- Adapt depth based on question complexity
+- Do NOT enforce identical formatting — keep style semi-consistent, not identical
+
+CITATION RULE (consistent throughout):
+- Attach [Source | Page X] to every factual claim
+- Use ONLY this format — never mix with [1], [Excerpt N], or filename formats
+
+LENGTH:
+- 150–300 words unless the topic genuinely requires more
+- Key points section: max 4–6 bullets
+- No paragraph repetition
+
+FORMULA RULE:
+- If a formula is in the context, include it on its own line
+- Explain variables in one brief sentence
+
+STYLE GOAL:
+✔ Research assistant — textbook clarity — compact synthesis
+✗ Not a verbose dump — not raw chunk stitching"""
+
+SYNTHESIS_USER = """Context (read ALL chunks before answering):
+
+{context_block}
+
+---
+
+Question: {query}
+
+Return a clean, structured, consistent answer following your instructions.
+Use ONLY information from the context above. Synthesize — do not summarize chunk by chunk."""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COVERAGE VALIDATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TOPIC_KEYWORDS: dict[str, list[str]] = {
+    "transformer":       ["encoder", "decoder", "attention", "positional"],
+    "self-attention":    ["query", "key", "value", "softmax"],
+    "attention":         ["query", "key", "value", "score"],
+    "neural network":    ["layer", "weight", "activation"],
+    "bert":              ["pre-training", "encoder", "fine-tuning"],
+    "gpt":               ["decoder", "autoregressive", "generation"],
+    "embedding":         ["vector", "dimension", "representation"],
+    "backpropagation":   ["gradient", "loss", "weight"],
+    "convolutional":     ["kernel", "filter", "pooling"],
+}
+
+
+def _required_keywords(query: str) -> list[str]:
+    q = query.lower()
+    required: list[str] = []
+    for topic, kws in _TOPIC_KEYWORDS.items():
+        if topic in q:
+            required.extend(kws[:3])
+    return list(set(required))
+
+
+def _validate_coverage(answer: str, query: str) -> tuple[bool, list[str]]:
+    """Returns (all_covered, list_of_missing_keywords)."""
+    required = _required_keywords(query)
+    if not required:
+        return True, []
+    a = answer.lower()
+    missing = [k for k in required if k not in a]
+    return len(missing) == 0, missing
+
+
+# def answer(query: str, chunks: list[dict]) -> str:
+
+    # """
+    # Generates a grounded, cited answer using Groq.
+
+    # 🧠 CONCEPT: system vs user message split for answering
+    # We split the prompt into two messages:
+    #   system : the role, rules, and citation format — behavioural instructions
+    #   user   : context excerpts + actual question — the variable content
+
+    # Why split?
+    # - System prompt is cached by Groq on repeated calls with same instructions
+    # - User message contains the dynamic content (different chunks per query)
+    # - Llama 3 models follow system instructions more reliably when separated
+    # - Cleaner separation of "how to behave" vs "what to answer"
+
+    # temperature=0.0 — fully deterministic.
+    # Same question + same chunks must always produce the same answer.
+    # Any randomness risks subtle hallucination in grounded generation.
+    # """
+    # if not chunks:
+    #     return (
+    #         "**Answer:** No relevant information found in the ingested "
+    #         "documents for this question.\n\n"
+    #         "**Confidence:** LOW\n\n"
+    #         "**Gaps:** The query appears to be outside the scope of "
+    #         "the available documents."
+    #     )
+
+    # context_block, context_quality = build_context_block(chunks)
+
+    # # Split into system (behaviour) + user (content)
+    # system_message = (
+    #     "You are a precise document intelligence assistant in a RAG system. "
+    #     "You answer ONLY from provided excerpts. "
+    #     "You NEVER use your training knowledge. "
+    #     "Every factual claim must have a citation in format: "
+    #     "[Excerpt X | Source: filename, page N]. "
+    #     "If a claim is not directly supported by an excerpt, omit it entirely."
+    #     + (f"\n\nSPECIAL INSTRUCTION: {llm_instruction}" if llm_instruction else "")
+    # )
+    
+
+    # user_message = ANSWERING_PROMPT.format(
+    #     context_quality=context_quality,
+    #     context_block=context_block,
+    #     query=query,
+    # )
+
+    # print(f"  [Groq] Sending {len(chunks)} excerpts to {MODEL}...")
+    # print(f"  [Groq] Top rerank score: {chunks[0].get('rerank_score', 0):.2f}")
+
+    # try:
+    #     response = client.chat.completions.create(
+    #         model=MODEL,
+    #         messages=[
+    #             {"role": "system", "content": system_message},
+    #             {"role": "user",   "content": user_message},
+    #         ],
+    #         temperature=0.0,
+    #         max_tokens=1024,
+    #     )
+
+    #     return response.choices[0].message.content.strip()
+
+    # except Exception as e:
+    #     return f"**Answer:** Error generating response — {e}\n\n**Confidence:** LOW"
+
+def answer(query: str, chunks: list[dict], intent: str = "explanation") -> str:
     """
-    Generates a grounded, cited answer using Groq.
+    Intent-aware answering with two distinct generation strategies:
 
-    🧠 CONCEPT: system vs user message split for answering
-    We split the prompt into two messages:
-      system : the role, rules, and citation format — behavioural instructions
-      user   : context excerpts + actual question — the variable content
+    explanation → SYNTHESIS PATH
+        Produces a structured, synthesized research-grade answer.
+        No inline citations. Reads all chunks collectively.
+        Coverage check + one targeted retry if topics are missing.
 
-    Why split?
-    - System prompt is cached by Groq on repeated calls with same instructions
-    - User message contains the dynamic content (different chunks per query)
-    - Llama 3 models follow system instructions more reliably when separated
-    - Cleaner separation of "how to behave" vs "what to answer"
-
-    temperature=0.0 — fully deterministic.
-    Same question + same chunks must always produce the same answer.
-    Any randomness risks subtle hallucination in grounded generation.
+    lookup / boolean / comparison / aggregation → GROUNDED PATH
+        Precise, extractive, citation-grounded answers.
+        Each factual claim cites its source chunk.
     """
     if not chunks:
         return (
@@ -807,29 +1009,106 @@ def answer(query: str, chunks: list[dict]) -> str:
 
     context_block, context_quality = build_context_block(chunks)
 
-    # Split into system (behaviour) + user (content)
-    system_message = (
-        "You are a precise document intelligence assistant in a RAG system. "
-        "You answer ONLY from provided excerpts. "
-        "You NEVER use your training knowledge. "
-        "Every factual claim must have a citation in format: "
-        "[Excerpt X | Source: filename, page N]. "
-        "If a claim is not directly supported by an excerpt, omit it entirely."
-        + (f"\n\nSPECIAL INSTRUCTION: {llm_instruction}" if llm_instruction else "")
-    )
-    
+    chunk_types  = [_classify_chunk(c.get("content", "")) for c in chunks]
+    type_summary = ", ".join(sorted(set(chunk_types)))
+    print(f"  [Groq] {len(chunks)} chunks ({type_summary}) → {MODEL}")
+    print(f"  [Groq] Top score: {chunks[0].get('rerank_score', 0):.2f} | Intent: {intent}")
 
+    # ── SYNTHESIS PATH ────────────────────────────────────────────────────────
+    if intent == "explanation":
+        user_message = SYNTHESIS_USER.format(
+            context_block=context_block,
+            query=query,
+        )
+        try:
+            first_answer = _groq().chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": SYNTHESIS_SYSTEM},
+                    {"role": "user",   "content": user_message},
+                ],
+                temperature=0.0,
+                max_tokens=2000,
+            ).choices[0].message.content.strip()
+
+            covered, missing = _validate_coverage(first_answer, query)
+            if not covered:
+                print(f"  [Coverage] Missing: {missing} — retrying...")
+                retry_msg = (
+                    f"Your answer is missing these required topics: {', '.join(missing)}.\n"
+                    f"Extend your answer to explicitly cover them. "
+                    f"Use ONLY the provided context."
+                )
+                first_answer = _groq().chat.completions.create(
+                    model=MODEL,
+                    messages=[
+                        {"role": "system", "content": SYNTHESIS_SYSTEM},
+                        {"role": "user",   "content": user_message},
+                        {"role": "assistant", "content": first_answer},
+                        {"role": "user",   "content": retry_msg},
+                    ],
+                    temperature=0.0,
+                    max_tokens=2000,
+                ).choices[0].message.content.strip()
+                print("  [Coverage] Retry complete")
+
+            return first_answer
+
+        except Exception as e:
+            return f"**Answer:** Error — {e}\n\n**Confidence:** LOW"
+
+    # ── GROUNDED PATH ─────────────────────────────────────────────────────────
+    INTENT_RULES = {
+        "lookup": (
+            "- Provide a precise, direct answer\n"
+            "- Start with the definition in ONE sentence\n"
+            "- Keep answer under 3 sentences\n"
+        ),
+        "boolean": (
+            "- FIRST word MUST be 'Yes' or 'No'\n"
+            "- Then provide justification from the chunks\n"
+            "- Do NOT hedge unless evidence is genuinely ambiguous\n"
+        ),
+        "comparison": (
+            "- Compare entities directly, not separately\n"
+            "- Highlight key differences AND similarities\n"
+            "- Use a structured format (bullets or table)\n"
+        ),
+        "aggregation": (
+            "- Extract ALL relevant items exhaustively\n"
+            "- Use bullet list format\n"
+            "- Combine across all chunks — do NOT miss any item\n"
+        ),
+    }
+    OUTPUT_CONSTRAINTS = {
+        "lookup":      "Answer MUST be short and precise.",
+        "boolean":     "Answer MUST start with YES or NO.",
+        "comparison":  "Answer MUST explicitly compare the items side by side.",
+        "aggregation": "Answer MUST be a complete bullet list.",
+    }
+
+    intent_rules = INTENT_RULES.get(intent, "- Answer directly and concisely.\n")
+    output_rule  = OUTPUT_CONSTRAINTS.get(intent, "")
+
+    system_message = (
+        "You are a high-precision RAG assistant.\n\n"
+        "RULES:\n"
+        "- Use ONLY information from the provided context\n"
+        "- NEVER use external knowledge or guess\n"
+        "- After every factual claim, cite: [Chunk N | Page X]\n"
+        f"- Context quality: {context_quality}\n\n"
+        f"INTENT: {intent}\n"
+        f"BEHAVIOR:\n{intent_rules}\n"
+        f"OUTPUT RULE: {output_rule}"
+    )
     user_message = ANSWERING_PROMPT.format(
         context_quality=context_quality,
         context_block=context_block,
         query=query,
     )
 
-    print(f"  [Groq] Sending {len(chunks)} excerpts to {MODEL}...")
-    print(f"  [Groq] Top rerank score: {chunks[0].get('rerank_score', 0):.2f}")
-
     try:
-        response = client.chat.completions.create(
+        return _groq().chat.completions.create(
             model=MODEL,
             messages=[
                 {"role": "system", "content": system_message},
@@ -837,9 +1116,6 @@ def answer(query: str, chunks: list[dict]) -> str:
             ],
             temperature=0.0,
             max_tokens=1024,
-        )
-
-        return response.choices[0].message.content.strip()
-
+        ).choices[0].message.content.strip()
     except Exception as e:
-        return f"**Answer:** Error generating response — {e}\n\n**Confidence:** LOW"
+        return f"**Answer:** Error — {e}\n\n**Confidence:** LOW"

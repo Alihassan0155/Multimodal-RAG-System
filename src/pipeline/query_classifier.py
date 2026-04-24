@@ -8,8 +8,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-MODEL  = "llama-3.3-70b-versatile"
+MODEL = "llama-3.3-70b-versatile"
+
+
+def _groq() -> Groq:
+    return Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 🧠 CONCEPT: Query Intent Classification
@@ -51,12 +54,23 @@ MODEL  = "llama-3.3-70b-versatile"
 INTENT_CONFIGS = {
     "lookup": {
         "top_k":          3,
-        "threshold":      -5.0,
+        "threshold":      -8.0,
         "expand_queries": True,
         "description":    "Precise fact retrieval",
         "llm_instruction": (
             "Answer the specific question directly and concisely. "
             "Focus on the single most relevant fact."
+        ),
+    },
+    "explanation": {
+        "top_k":          7,
+        "threshold":      -8.0,
+        "expand_queries": True,
+        "description":    "Conceptual explanation requiring multiple supporting chunks",
+        "llm_instruction": (
+            "Explain the concept clearly and thoroughly. "
+            "Use step-by-step reasoning where applicable. "
+            "Synthesise information across all provided excerpts."
         ),
     },
     "aggregation": {
@@ -100,10 +114,16 @@ CLASSIFIER_PROMPT = """You are a query intent classifier for a RAG (Retrieval-Au
 Classify the user query into exactly one of these intent types:
 
 **lookup**
-The user wants one specific fact, definition, or value.
+The user wants one specific fact, value, or short definition (answerable in 1-2 sentences).
 Examples: "what does MIC stand for?", "what is the accuracy?", "define plasmid"
 
-**aggregation**  
+**explanation**
+The user wants a conceptual explanation of how something works, what something is in depth,
+or an understanding of a mechanism/architecture. These questions need multiple supporting chunks.
+Examples: "what is self-attention?", "how does the transformer work?", "explain backpropagation",
+"what is BERT and how does it work?", "how does attention differ from convolution?"
+
+**aggregation**
 The user wants a compiled list, summary, or synthesis across the whole document.
 Examples: "list all key terms", "summarise the methods", "what are all the features used?"
 
@@ -117,18 +137,24 @@ Examples: "does the system use plasmids?", "is GNN used for prediction?", "are k
 
 ## Classification rules
 - Choose the SINGLE best matching intent
-- When in doubt between lookup and aggregation: if the query contains
-  "all", "list", "every", "summarise", "overview" → aggregation
-- When in doubt between lookup and boolean: if the query can be answered
-  yes/no → boolean
+- Key rule: if the query asks "what is X AND how does it work" or "explain X" → explanation (not lookup)
+- When in doubt between lookup and explanation: if a thorough answer needs more than 2 sentences → explanation
+- When in doubt between lookup and aggregation: if the query contains "all", "list", "every" → aggregation
+- When in doubt between lookup and boolean: if the query can be answered yes/no → boolean
 - Output ONLY valid JSON, no explanation
 
 ## Output format
-{{"intent": "lookup|aggregation|comparison|boolean", "confidence": 0.0-1.0, "reason": "one sentence"}}
+{{"intent": "lookup|explanation|aggregation|comparison|boolean", "confidence": 0.0-1.0, "reason": "one sentence"}}
 
 ## Examples
 Query: "what does MIC stand for?"
 Output: {{"intent": "lookup", "confidence": 0.98, "reason": "Asks for definition of a specific acronym"}}
+
+Query: "what are transformers and how does self-attention work?"
+Output: {{"intent": "explanation", "confidence": 0.97, "reason": "Asks for deep conceptual explanation of an architecture and its core mechanism"}}
+
+Query: "how does scaled dot-product attention compute scores?"
+Output: {{"intent": "explanation", "confidence": 0.95, "reason": "Asks how a mechanism works — needs multiple excerpts covering the formula and process"}}
 
 Query: "list all key terms defined in the document"
 Output: {{"intent": "aggregation", "confidence": 0.97, "reason": "Asks to list ALL terms across the document"}}
@@ -170,7 +196,7 @@ def classify_query(query: str) -> dict:
     print(f"  [Classifier] Classifying intent for: '{query[:60]}'")
 
     try:
-        response = client.chat.completions.create(
+        response = _groq().chat.completions.create(
             model=MODEL,
             messages=[
                 {
@@ -199,8 +225,8 @@ def classify_query(query: str) -> dict:
 
         # Validate intent
         if intent not in INTENT_CONFIGS:
-            print(f"  [Classifier] Unknown intent '{intent}' — defaulting to lookup")
-            intent = "lookup"
+            print(f"  [Classifier] Unknown intent '{intent}' — defaulting to explanation")
+            intent = "explanation"
 
         config = INTENT_CONFIGS[intent].copy()
         config["intent"]     = intent

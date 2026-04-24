@@ -222,21 +222,21 @@ def add_chunks_to_collection(collection, chunks: list[dict]) -> int:
     # ]
 
     metadatas = [
-    {
-        "doc_id":      chunk["doc_id"],
-        "source":      chunk["source"],
-        "page":        chunk["page"],
-        "type":        chunk["type"],
-        "chunk_index": chunk["chunk_index"],
-        "token_count": chunk.get("token_count", 0),
-        "has_tables":  chunk.get("has_tables", False),
-        # Table-specific fields (empty string for text chunks)
-        "method":      chunk.get("method", "text"),
-        "headers":     chunk.get("headers", ""),
-        "accuracy":    float(chunk.get("accuracy", 0.0)),
-    }
-    for chunk in chunks
-]
+        {
+            "doc_id":      chunk["doc_id"],
+            "source":      chunk["source"],
+            "page":        chunk["page"],
+            "type":        chunk["type"],
+            "heading":     chunk.get("heading", ""),
+            "chunk_index": chunk["chunk_index"],
+            "token_count": chunk.get("token_count", 0),
+            "has_tables":  chunk.get("has_tables", False),
+            "method":      chunk.get("method", "text"),
+            "headers":     chunk.get("headers", ""),
+            "accuracy":    float(chunk.get("accuracy", 0.0)),
+        }
+        for chunk in chunks
+    ]
 
     # ── Store ─────────────────────────────────────────────────────────────
     collection.add(

@@ -9,3 +9,6 @@ rank-bm25
 camelot-py[cv]
 opencv-python
 ghostscript
+fastapi
+uvicorn
+python-multipart
