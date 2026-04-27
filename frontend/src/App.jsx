@@ -9,19 +9,6 @@ import { Toaster } from 'react-hot-toast'
 function App() {
   const [activeView, setActiveView] = useState('chat')
 
-  const renderView = () => {
-    switch (activeView) {
-      case 'chat':
-        return <ChatView />
-      case 'upload':
-        return <UploadView />
-      case 'knowledge':
-        return <KnowledgeBase />
-      default:
-        return <ChatView />
-    }
-  }
-
   return (
     <div className="flex h-screen bg-dark-900 bg-mesh">
       <Toaster
@@ -40,8 +27,10 @@ function App() {
         }}
       />
       <Sidebar activeView={activeView} setActiveView={setActiveView} />
-      <main className="flex-1 overflow-hidden">
-        {renderView()}
+      <main className="flex-1 overflow-hidden relative">
+        <div className={`absolute inset-0 ${activeView === 'chat' ? 'block' : 'hidden'}`}><ChatView /></div>
+        <div className={`absolute inset-0 ${activeView === 'upload' ? 'block' : 'hidden'}`}><UploadView /></div>
+        <div className={`absolute inset-0 ${activeView === 'knowledge' ? 'block' : 'hidden'}`}><KnowledgeBase /></div>
       </main>
     </div>
   )

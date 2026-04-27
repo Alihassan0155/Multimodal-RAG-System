@@ -3,12 +3,16 @@
 import json
 import re
 import os
+import time
 from groq import Groq
 from dotenv import load_dotenv
 
 load_dotenv()
 
-MODEL = "llama-3.3-70b-versatile"
+MODEL          = "llama-3.3-70b-versatile"
+FALLBACK_MODEL = "llama-3.1-8b-instant"
+
+_classify_cache: dict = {}
 
 
 def _groq() -> Groq:
@@ -63,7 +67,7 @@ INTENT_CONFIGS = {
         ),
     },
     "explanation": {
-        "top_k":          7,
+        "top_k":          5,
         "threshold":      -8.0,
         "expand_queries": True,
         "description":    "Conceptual explanation requiring multiple supporting chunks",
@@ -195,27 +199,52 @@ def classify_query(query: str) -> dict:
     """
     print(f"  [Classifier] Classifying intent for: '{query[:60]}'")
 
-    try:
-        response = _groq().chat.completions.create(
-            model=MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a query intent classifier. "
-                        "Output ONLY valid JSON. No markdown, no explanation."
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": CLASSIFIER_PROMPT.format(query=query)
-                }
-            ],
-            temperature=0.0,   # fully deterministic — same query = same intent
-            max_tokens=100,
-        )
+    if query in _classify_cache:
+        print("  [Classifier] Cache hit")
+        return _classify_cache[query]
 
-        raw = response.choices[0].message.content.strip()
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a query intent classifier. "
+                "Output ONLY valid JSON. No markdown, no explanation."
+            )
+        },
+        {
+            "role": "user",
+            "content": CLASSIFIER_PROMPT.format(query=query)
+        }
+    ]
+
+    raw = None
+    delay = 5
+    for attempt in range(3):
+        try:
+            raw = _groq().chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                temperature=0.0,
+                max_tokens=100,
+            ).choices[0].message.content.strip()
+            break
+        except Exception as e:
+            if "429" not in str(e):
+                raise
+            if attempt < 2:
+                print(f"  [Classifier Retry {attempt + 1}] Rate limit — waiting {delay}s...")
+                time.sleep(delay)
+                delay *= 2
+            else:
+                print(f"  [Classifier Fallback] Switching to {FALLBACK_MODEL}")
+                raw = _groq().chat.completions.create(
+                    model=FALLBACK_MODEL,
+                    messages=messages,
+                    temperature=0.0,
+                    max_tokens=100,
+                ).choices[0].message.content.strip()
+
+    try:
         raw = re.sub(r"```json\s*|\s*```", "", raw).strip()
 
         data       = json.loads(raw)
@@ -236,6 +265,7 @@ def classify_query(query: str) -> dict:
         print(f"  [Classifier] Intent: {intent} "
               f"(confidence: {confidence:.2f}) — {reason}")
 
+        _classify_cache[query] = config
         return config
 
     except Exception as e:

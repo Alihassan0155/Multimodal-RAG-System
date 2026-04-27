@@ -12,3 +12,5 @@ ghostscript
 fastapi
 uvicorn
 python-multipart
+Pillow
+numpy

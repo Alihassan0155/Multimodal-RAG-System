@@ -56,6 +56,7 @@
 from pathlib import Path
 from src.ingest.extract_text import extract_pdf
 from src.ingest.extract_tables import extract_tables_from_pdf
+from src.ingest.extract_images import extract_images_from_pdf
 from src.pipeline.chunker import chunk_document
 from src.pipeline.vectorstore import (
     get_or_create_collection,
@@ -65,46 +66,51 @@ from src.pipeline.vectorstore import (
 
 
 def ingest(pdf_path: str):
-    """
-    Full pipeline: PDF → extract text → extract tables → chunk → embed → ChromaDB.
-    """
+    """Full pipeline: PDF → extract text → extract tables → chunk → embed → ChromaDB."""
     print("=" * 55)
     print(f"  INGESTING: {Path(pdf_path).name}")
     print("=" * 55)
 
     # ── Step 1: Extract text ──────────────────────────────────────────────
-    print("\n[1/4] Extracting text...")
+    print("  [1/5] Reading PDF...")
     pages      = extract_pdf(pdf_path)
     text_pages = [p for p in pages if p["char_count"] > 0]
-
-    print(f"  {len(text_pages)} pages with text | "
-          f"{len(pages) - len(text_pages)} image-only (Phase 3)")
+    print(f"  {len(text_pages)} pages with text | {len(pages) - len(text_pages)} image-only")
 
     # ── Step 2: Extract tables ────────────────────────────────────────────
-    print("\n[2/4] Extracting tables...")
+    print("  [2/5] Scanning for tables...")
     table_chunks = extract_tables_from_pdf(pdf_path, pages)
-    print(f"  {len(table_chunks)} table chunks extracted")
+    print(f"  Found {len(table_chunks)} table(s)")
 
     # ── Step 3: Chunk text pages ──────────────────────────────────────────
-    print("\n[3/4] Chunking text...")
+    print("  [3/5] Chunking...")
     text_chunks = chunk_document(text_pages) if text_pages else []
-
-    # Combine text + table chunks
-    all_chunks   = text_chunks + table_chunks
-    token_counts = [c.get("token_count", 0) for c in text_chunks]
-
-    print(f"  {len(text_chunks)} text chunks")
-    print(f"  {len(table_chunks)} table chunks")
-    print(f"  {len(all_chunks)} total chunks")
+    all_chunks  = text_chunks + table_chunks
+    print(f"  Created {len(all_chunks)} chunks")
 
     if not all_chunks:
         print("⚠ No chunks created.")
         return
 
-    # ── Step 4: Embed + Store ─────────────────────────────────────────────
-    print("\n[4/4] Embedding and storing in ChromaDB...")
+    # ── Step 4: Embed + Store text/table chunks ───────────────────────────
+    print("  [4/5] Embedding and storing...")
     collection = get_or_create_collection("documents")
     added      = add_chunks_to_collection(collection, all_chunks)
+    print(f"  Indexed {added} sections")
+
+    # ── Step 5: Extract + Index images ───────────────────────────────────
+    print("  [5/5] Processing images...")
+    try:
+        from src.retrieval.image_retriever import ImageRetriever
+        doc_id = all_chunks[0].get("doc_id", Path(pdf_path).stem) if all_chunks else Path(pdf_path).stem
+        images = extract_images_from_pdf(pdf_path, doc_id)
+        if images:
+            ImageRetriever().index_images(images)
+            print(f"  Indexed {len(images)} image(s)")
+        else:
+            print("  No images found")
+    except Exception as e:
+        print(f"  [Images] Skipped — {e}")
 
     # ── Summary ───────────────────────────────────────────────────────────
     print("\n" + "=" * 55)

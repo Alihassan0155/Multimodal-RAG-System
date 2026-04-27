@@ -1,12 +1,15 @@
-import { useState, useEffect } from 'react'
-import { Database, FileText, Trash2, RefreshCw, AlertTriangle, Layers } from 'lucide-react'
+import { useState, useEffect, useMemo } from 'react'
+import { FileText, Trash2, RefreshCw, Library, WifiOff, Search, X, Upload, AlertCircle } from 'lucide-react'
 import toast from 'react-hot-toast'
 
-export default function KnowledgeBase() {
-  const [stats, setStats] = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
-  const [deleting, setDeleting] = useState(null)
+/* ── API ─────────────────────────────────────────────────────── */
+export default function KnowledgeBase({ onNavigate }) {
+  const [stats, setStats]       = useState(null)
+  const [loading, setLoading]   = useState(true)
+  const [error, setError]       = useState(null)
+  const [deleting, setDeleting] = useState(null)   // doc_id currently being deleted
+  const [confirm, setConfirm]   = useState(null)   // doc_id awaiting inline confirmation
+  const [search, setSearch]     = useState('')
 
   const fetchStats = async () => {
     setLoading(true)
@@ -14,12 +17,9 @@ export default function KnowledgeBase() {
     try {
       const res = await fetch('/api/stats')
       if (!res.ok) throw new Error('Failed to fetch stats')
-      const data = await res.json()
-      setStats(data)
+      setStats(await res.json())
     } catch (err) {
-      const isOffline = err instanceof TypeError
-      setError(isOffline ? 'offline' : err.message)
-      if (!isOffline) toast.error('Could not load knowledge base stats')
+      setError(err instanceof TypeError ? 'offline' : err.message)
     } finally {
       setLoading(false)
     }
@@ -28,12 +28,12 @@ export default function KnowledgeBase() {
   useEffect(() => { fetchStats() }, [])
 
   const handleDelete = async (docId, source) => {
-    if (!confirm(`Delete all chunks for "${source}"?`)) return
     setDeleting(docId)
+    setConfirm(null)
     try {
       const res = await fetch(`/api/docs/${docId}`, { method: 'DELETE' })
-      if (!res.ok) { const err = await res.json(); throw new Error(err.detail) }
-      toast.success(`Deleted ${source}`)
+      if (!res.ok) { const e = await res.json(); throw new Error(e.detail) }
+      toast.success(`"${source}" removed from your library`)
       fetchStats()
     } catch (err) {
       toast.error(err.message)
@@ -42,72 +42,92 @@ export default function KnowledgeBase() {
     }
   }
 
+  const filteredDocs = useMemo(() => {
+    if (!stats?.documents) return []
+    const q = search.trim().toLowerCase()
+    return q ? stats.documents.filter(d => d.source.toLowerCase().includes(q)) : stats.documents
+  }, [stats, search])
+
+  /* ── Render ─────────────────────────────────────────────────── */
   return (
     <div className="flex flex-col h-full">
-      <header className="px-8 py-5 border-b border-white/[0.06] bg-dark-800/30 backdrop-blur-sm flex items-center justify-between">
-        <div>
+
+      {/* Header */}
+      <header className="px-8 py-5 border-b border-white/[0.06] bg-dark-800/30 backdrop-blur-sm flex items-center justify-between gap-4">
+        <div className="min-w-0">
           <h2 className="text-xl font-bold text-white flex items-center gap-2">
-            <Database className="w-5 h-5 text-accent-light" /> Knowledge Base
+            <Library className="w-5 h-5 text-accent-light shrink-0" />
+            My Library
           </h2>
-          <p className="text-sm text-gray-500 mt-1">Manage your ingested documents</p>
+          <p className="text-sm text-gray-500 mt-0.5">
+            {stats && !loading
+              ? `${stats.total_documents} ${stats.total_documents === 1 ? 'document' : 'documents'} ready to chat`
+              : 'All documents you can chat with'}
+          </p>
         </div>
-        <button onClick={fetchStats} disabled={loading} className="btn-ghost flex items-center gap-2 text-sm">
-          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} /> Refresh
+        <button
+          onClick={fetchStats}
+          disabled={loading}
+          className="btn-ghost flex items-center gap-2 text-sm shrink-0"
+        >
+          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+          Refresh
         </button>
       </header>
 
+      {/* Body */}
       <div className="flex-1 overflow-y-auto px-8 py-6">
         {loading ? (
-          <div className="flex items-center justify-center py-20">
-            <RefreshCw className="w-8 h-8 text-accent-light animate-spin" />
-          </div>
+          <SkeletonList />
         ) : error === 'offline' ? (
           <OfflineState onRetry={fetchStats} />
-        ) : !stats || stats.total_chunks === 0 ? (
-          <EmptyKB />
+        ) : !stats || stats.total_documents === 0 ? (
+          <EmptyLibrary />
         ) : (
-          <div className="space-y-6 animate-fade-in">
-            {/* Stats cards */}
-            <div className="grid grid-cols-3 gap-4">
-              <StatCard icon={<Layers className="w-5 h-5" />} label="Total Chunks" value={stats.total_chunks} color="accent" />
-              <StatCard icon={<FileText className="w-5 h-5" />} label="Documents" value={stats.total_documents} color="cyan" />
-              <StatCard icon={<Database className="w-5 h-5" />} label="Collections" value="1" color="purple" />
+          <div className="max-w-2xl mx-auto space-y-5 animate-fade-in">
+
+            {/* Search bar */}
+            <div className="relative">
+              <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 pointer-events-none" />
+              <input
+                type="text"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Search documents…"
+                className="input-field pl-10 pr-10 text-sm"
+              />
+              {search && (
+                <button
+                  onClick={() => setSearch('')}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
             </div>
 
             {/* Document list */}
-            <div>
-              <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Ingested Documents</h3>
-              <div className="space-y-3">
-                {stats.documents.map((doc) => (
-                  <div key={doc.doc_id} className="glass-card flex items-center justify-between group">
-                    <div className="flex items-center gap-4">
-                      <div className="w-11 h-11 rounded-xl bg-cyan/10 border border-cyan/20 flex items-center justify-center">
-                        <FileText className="w-5 h-5 text-cyan" />
-                      </div>
-                      <div>
-                        <p className="text-sm font-semibold text-white">{doc.source}</p>
-                        <div className="flex items-center gap-3 mt-1">
-                          <span className="text-xs text-gray-500">{doc.chunks} chunks</span>
-                          <span className="text-xs text-gray-600">·</span>
-                          <span className="text-xs text-gray-500">{doc.pages?.length || 0} pages</span>
-                          <span className="text-xs text-gray-600">·</span>
-                          <span className="text-xs text-gray-500">{doc.types?.join(', ')}</span>
-                        </div>
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => handleDelete(doc.doc_id, doc.source)}
-                      disabled={deleting === doc.doc_id}
-                      className="opacity-0 group-hover:opacity-100 p-2 text-gray-500 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all"
-                    >
-                      {deleting === doc.doc_id
-                        ? <RefreshCw className="w-4 h-4 animate-spin" />
-                        : <Trash2 className="w-4 h-4" />}
-                    </button>
-                  </div>
+            {filteredDocs.length === 0 ? (
+              <div className="text-center py-12 text-gray-500">
+                <Search className="w-8 h-8 mx-auto mb-3 opacity-40" />
+                <p className="text-sm">No documents match "{search}"</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {filteredDocs.map((doc) => (
+                  <DocCard
+                    key={doc.doc_id}
+                    doc={doc}
+                    isDeleting={deleting === doc.doc_id}
+                    confirmPending={confirm === doc.doc_id}
+                    onAskConfirm={() => setConfirm(doc.doc_id)}
+                    onCancelConfirm={() => setConfirm(null)}
+                    onConfirmDelete={() => handleDelete(doc.doc_id, doc.source)}
+                  />
                 ))}
               </div>
-            </div>
+            )}
+
           </div>
         )}
       </div>
@@ -115,50 +135,137 @@ export default function KnowledgeBase() {
   )
 }
 
-function StatCard({ icon, label, value, color }) {
-  const colors = {
-    accent: 'from-accent/10 to-accent/5 border-accent/20 text-accent-light',
-    cyan: 'from-cyan/10 to-cyan/5 border-cyan/20 text-cyan',
-    purple: 'from-purple-500/10 to-purple-500/5 border-purple-500/20 text-purple-400',
-  }
+/* ── Document card ───────────────────────────────────────────── */
+function DocCard({ doc, isDeleting, confirmPending, onAskConfirm, onCancelConfirm, onConfirmDelete }) {
+  const pageCount = doc.pages?.length ?? 0
+
   return (
-    <div className={`glass-card bg-gradient-to-br ${colors[color]} flex items-center gap-4`}>
-      <div className={`w-10 h-10 rounded-xl bg-white/[0.05] flex items-center justify-center ${colors[color].split(' ').pop()}`}>{icon}</div>
-      <div>
-        <p className="text-2xl font-bold text-white">{value}</p>
-        <p className="text-xs text-gray-500">{label}</p>
+    <div className={`relative group rounded-2xl border transition-all duration-200 overflow-hidden
+      ${confirmPending
+        ? 'border-red-500/30 bg-red-500/5'
+        : 'border-white/[0.07] bg-white/[0.02] hover:bg-white/[0.04] hover:border-white/[0.12]'
+      }`}
+    >
+      {/* Left accent bar */}
+      <div className={`absolute left-0 top-0 bottom-0 w-[3px] rounded-l-2xl transition-colors duration-200
+        ${confirmPending ? 'bg-red-500/60' : 'bg-gradient-to-b from-accent to-cyan opacity-0 group-hover:opacity-100'}`}
+      />
+
+      <div className="px-5 py-4 flex items-center gap-4">
+        {/* Icon */}
+        <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 transition-colors
+          ${confirmPending ? 'bg-red-500/10 border border-red-500/20' : 'bg-accent/8 border border-accent/15'}`}>
+          <FileText className={`w-5 h-5 ${confirmPending ? 'text-red-400' : 'text-accent-light'}`} />
+        </div>
+
+        {/* Info */}
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-white truncate leading-snug" title={doc.source}>
+            {doc.source}
+          </p>
+          {!confirmPending && (
+            <div className="flex items-center gap-2 mt-1">
+              <span className="text-[11px] font-medium px-1.5 py-0.5 rounded-md bg-accent/10 text-accent-light">
+                PDF
+              </span>
+              {pageCount > 0 && (
+                <span className="text-[11px] text-gray-500">
+                  {pageCount} {pageCount === 1 ? 'page' : 'pages'}
+                </span>
+              )}
+              <span className="flex items-center gap-1 text-[11px] text-emerald-400">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
+                Ready
+              </span>
+            </div>
+          )}
+          {confirmPending && (
+            <p className="text-xs text-red-400 mt-0.5">
+              This will remove all indexed content for this file.
+            </p>
+          )}
+        </div>
+
+        {/* Actions */}
+        {isDeleting ? (
+          <RefreshCw className="w-4 h-4 text-gray-500 animate-spin shrink-0" />
+        ) : confirmPending ? (
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={onCancelConfirm}
+              className="text-xs px-3 py-1.5 rounded-lg border border-white/10 text-gray-400 hover:text-white hover:border-white/20 transition-all"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={onConfirmDelete}
+              className="text-xs px-3 py-1.5 rounded-lg bg-red-500/15 border border-red-500/30 text-red-400 hover:bg-red-500/25 transition-all font-medium"
+            >
+              Remove
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={onAskConfirm}
+            title="Remove from library"
+            className="opacity-0 group-hover:opacity-100 p-2 text-gray-600 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all shrink-0"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+        )}
       </div>
     </div>
   )
 }
 
-function EmptyKB() {
+/* ── Skeleton ────────────────────────────────────────────────── */
+function SkeletonList() {
   return (
-    <div className="flex flex-col items-center justify-center py-20 animate-fade-in">
-      <div className="w-20 h-20 rounded-2xl bg-dark-700 border border-white/10 flex items-center justify-center mb-6">
-        <AlertTriangle className="w-9 h-9 text-gray-600" />
+    <div className="max-w-2xl mx-auto space-y-5 animate-pulse">
+      {/* Search skeleton */}
+      <div className="h-11 rounded-xl bg-white/[0.04]" />
+      {/* Card skeletons */}
+      {[1, 2, 3].map(i => (
+        <div key={i} className="rounded-2xl border border-white/[0.06] bg-white/[0.02] px-5 py-4 flex items-center gap-4">
+          <div className="w-10 h-10 rounded-xl bg-white/[0.05] shrink-0" />
+          <div className="flex-1 space-y-2">
+            <div className="h-3.5 rounded-md bg-white/[0.07] w-3/5" />
+            <div className="h-2.5 rounded-md bg-white/[0.04] w-1/3" />
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/* ── Empty state ─────────────────────────────────────────────── */
+function EmptyLibrary() {
+  return (
+    <div className="flex flex-col items-center justify-center py-24 animate-fade-in">
+      <div className="w-16 h-16 rounded-2xl bg-accent/8 border border-accent/15 flex items-center justify-center mb-5">
+        <Library className="w-7 h-7 text-accent-light opacity-70" />
       </div>
-      <h3 className="text-xl font-bold text-white mb-2">Knowledge Base is Empty</h3>
-      <p className="text-gray-500 text-center max-w-md">
-        No documents have been ingested yet. Go to the Upload section to add PDF files.
+      <h3 className="text-lg font-bold text-white mb-2">Your library is empty</h3>
+      <p className="text-gray-500 text-center text-sm max-w-xs leading-relaxed">
+        Upload a PDF to get started — then ask it anything.
       </p>
     </div>
   )
 }
 
+/* ── Offline state ───────────────────────────────────────────── */
 function OfflineState({ onRetry }) {
   return (
-    <div className="flex flex-col items-center justify-center py-20 animate-fade-in">
-      <div className="w-20 h-20 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mb-6">
-        <AlertTriangle className="w-9 h-9 text-red-400" />
+    <div className="flex flex-col items-center justify-center py-24 animate-fade-in">
+      <div className="w-16 h-16 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mb-5">
+        <WifiOff className="w-7 h-7 text-red-400 opacity-80" />
       </div>
-      <h3 className="text-xl font-bold text-white mb-2">API Server Offline</h3>
-      <p className="text-gray-500 text-center max-w-md mb-6">
-        Cannot connect to the backend. Make sure it's running:
-        <code className="block mt-2 text-xs bg-dark-700 px-3 py-2 rounded-lg text-gray-300">python api.py</code>
+      <h3 className="text-lg font-bold text-white mb-2">Can't connect</h3>
+      <p className="text-gray-500 text-center text-sm max-w-xs leading-relaxed mb-6">
+        DocFlow's backend isn't reachable. Make sure the server is running, then try again.
       </p>
       <button onClick={onRetry} className="btn-primary text-sm flex items-center gap-2">
-        <RefreshCw className="w-4 h-4" /> Retry
+        <RefreshCw className="w-4 h-4" /> Try again
       </button>
     </div>
   )

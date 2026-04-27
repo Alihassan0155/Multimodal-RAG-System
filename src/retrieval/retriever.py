@@ -139,18 +139,8 @@ class HybridRetriever:
                   "in", "of", "to", "and", "or", "with", "for", "its", "it"}
 
     def _boost_metadata(self, chunks: list[dict], query: str) -> list[dict]:
-        """
-        Bumps rerank scores for chunks whose section heading overlaps with the
-        query. The heading is stored in the `heading` metadata field when
-        present; otherwise the first line of content is used as a proxy
-        (the chunker prepends headings to content text).
-
-        Boost table: 3+ term overlap → +2.0, 2 → +1.0, 1 → +0.5
-        Small enough not to override a genuinely low reranker score, large
-        enough to pull up a correct-section chunk that ranked just below the
-        cut.
-        """
-        query_terms = set(query.lower().split()) - self._STOPWORDS
+        query_lower = query.lower()
+        query_terms = set(query_lower.split()) - self._STOPWORDS
 
         for chunk in chunks:
             heading = chunk.get("heading", "")
@@ -161,8 +151,8 @@ class HybridRetriever:
 
             heading_terms = set(heading.lower().split()) - self._STOPWORDS
             overlap = len(query_terms & heading_terms)
-
             boost = 2.0 if overlap >= 3 else 1.0 if overlap >= 2 else 0.5 if overlap >= 1 else 0.0
+
             chunk["rerank_score"] = chunk.get("rerank_score", 0.0) + boost
 
         chunks.sort(key=lambda x: x["rerank_score"], reverse=True)
@@ -279,7 +269,7 @@ class HybridRetriever:
                 relevant.append(c)
 
         if not relevant:
-            print("  [Fallback] No chunks passed threshold — using top results anyway")
+            print("  [Threshold] No chunks passed — falling back to all reranked")
             relevant = reranked
 
         print(f"  [Threshold] {len(relevant)} chunks passed")

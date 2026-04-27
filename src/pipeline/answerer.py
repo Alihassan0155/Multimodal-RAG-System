@@ -447,6 +447,7 @@
 import os
 import json
 import re
+import time
 from dotenv import load_dotenv
 from groq import Groq
 
@@ -479,11 +480,48 @@ load_dotenv()
 #   - Speed difference on Groq between 8b and 70b is small (LPU advantage)
 # ─────────────────────────────────────────────────────────────────────────────
 
-MODEL = "llama-3.3-70b-versatile"
+MODEL          = "llama-3.3-70b-versatile"
+FALLBACK_MODEL = "llama-3.1-8b-instant"
+
+_expansion_cache: dict = {}
+_answer_cache:    dict = {}
 
 
 def _groq() -> Groq:
     return Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+
+def _groq_complete(messages: list, temperature: float = 0.0, max_tokens: int = 1024) -> str:
+    """
+    Groq call with exponential-backoff retry on 429 and automatic
+    fallback to FALLBACK_MODEL after retries are exhausted.
+    Returns the response text directly.
+    """
+    delay = 5
+    for attempt in range(3):
+        try:
+            return _groq().chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            ).choices[0].message.content.strip()
+        except Exception as e:
+            if "429" not in str(e):
+                raise
+            if attempt < 2:
+                print(f"  [Retry {attempt + 1}] Rate limit — waiting {delay}s...")
+                time.sleep(delay)
+                delay *= 2
+            else:
+                print(f"  [Fallback] {MODEL} exhausted — switching to {FALLBACK_MODEL}")
+                return _groq().chat.completions.create(
+                    model=FALLBACK_MODEL,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                ).choices[0].message.content.strip()
+    raise RuntimeError("LLM call failed after retries and fallback")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -620,9 +658,12 @@ def expand_query(query: str) -> list[str]:
     """
     print(f"\n  [Expansion] Generating 4 variants for: '{query}'")
 
+    if query in _expansion_cache:
+        print("  [Expansion] Cache hit — skipping LLM call")
+        return _expansion_cache[query]
+
     try:
-        response = _groq().chat.completions.create(
-            model=MODEL,
+        raw = _groq_complete(
             messages=[
                 {
                     "role": "system",
@@ -640,15 +681,6 @@ def expand_query(query: str) -> list[str]:
             max_tokens=512,
         )
 
-        # ── Extract and parse response ────────────────────────────────────
-        # 🧠 CONCEPT: Groq response structure
-        # response.choices[0].message.content → the generated text string
-        # Same structure as OpenAI — Groq is OpenAI API-compatible.
-        # This means switching from OpenAI to Groq is literally one line:
-        # change the client init. Everything else stays identical.
-        raw = response.choices[0].message.content.strip()
-
-        # Strip markdown fences if model adds them despite instructions
         raw = re.sub(r"```json\s*|\s*```", "", raw).strip()
 
         data     = json.loads(raw)
@@ -673,6 +705,7 @@ def expand_query(query: str) -> list[str]:
             label = "original " if i == 0 else f"variant {i}"
             print(f"    [{label}] {q}")
 
+        _expansion_cache[query] = all_queries
         return all_queries
 
     except json.JSONDecodeError as e:
@@ -690,55 +723,34 @@ def expand_query(query: str) -> list[str]:
 # STAGE 2: GROUNDED ANSWERING
 # ─────────────────────────────────────────────────────────────────────────────
 
-ANSWERING_PROMPT = """You are a precise document intelligence assistant operating in a RAG (Retrieval-Augmented Generation) system.
+ANSWERING_PROMPT = """Answer using ONLY the document excerpts below. No external knowledge.
 
-## Your role
-Answer the user's question using ONLY the numbered document excerpts provided below.
-You have access to NO other information source. Your training knowledge does not exist for this task.
+CITATION FORMAT (mandatory):
+  [Excerpt X | Source: <exact filename>, page Y]
+Never invent filenames, excerpt numbers, or page numbers.
 
-## Strict grounding rules
-1. ONLY use information explicitly stated in the excerpts — nothing else
-2. If a claim cannot be directly supported by a specific excerpt, do NOT include it
-3. Do NOT generalise beyond what is explicitly stated, even if it seems logically obvious
-4. Do NOT infer, assume, or extrapolate — only report what the text directly says
-5. If the excerpts do not contain the answer, say so clearly and specifically
+GROUNDING RULES:
+1. Every factual claim must be supported by a specific excerpt.
+2. Do NOT infer or generalise beyond what is explicitly stated.
+3. If the context does not contain the answer: "Not found in provided documents."
 
-## Citation format
-After EVERY factual claim, cite the source using this exact format:
-[Excerpt X | Source: filename, page N]
+Context quality: {context_quality}
 
-Where X is the excerpt number shown in the context below.
-Use this format consistently — do not invent page numbers or excerpt numbers.
-
-## Confidence levels
-- HIGH   = excerpt directly and completely answers the question with explicit statements
-- MEDIUM = excerpt partially answers or implies the answer — state what is missing
-- LOW    = excerpts are tangentially related — answer is uncertain, flag this clearly
-
-## Context quality
-{context_quality}
-
-## Document excerpts (retrieved and ranked by relevance to your question)
+Document excerpts:
 {context_block}
 
-## User question
-{query}
+Question: {query}
 
-## Response format
+━━━ RESPOND IN THIS EXACT FORMAT ━━━
 
-**Answer:**
-[Your grounded answer. Every factual claim followed by [Excerpt X | Source: filename, page N].
-If the context does not support a complete answer, state exactly what is and is not covered.]
+🧠 **Answer**
+[Direct grounded answer — max 120 words. Cite every claim with [Excerpt X | Source: <filename>, page Y]]
 
-**Key points:**
-- [specific point] [Excerpt X | Source: filename, page N]
-- [specific point] [Excerpt X | Source: filename, page N]
+💡 **Key Idea**
+[1–2 sentence intuition or mechanism]
 
-**Confidence:** [HIGH / MEDIUM / LOW]
-
-**Gaps:**
-[Specific information that would improve the answer but is not present in the excerpts.
-Write "None" if the excerpts fully answer the question.]"""
+📚 **Sources**
+[All citations used, one per line]"""
 
 
 def _classify_chunk(content: str) -> str:
@@ -799,17 +811,11 @@ def build_context_block(chunks: list[dict]) -> tuple[str, str]:
     top_score = chunks[0].get("rerank_score", 0)
 
     for i, chunk in enumerate(chunks, 1):
-        score       = round(chunk.get("rerank_score", 0), 2)
-        source      = chunk.get("source", "unknown")
-        page        = chunk.get("page", "?")
-        heading     = chunk.get("heading", "")
-        content     = chunk.get("content", "").strip()
-        chunk_type  = _classify_chunk(content)
+        source  = chunk.get("source", "unknown")
+        page    = chunk.get("page", "?")
+        content = chunk.get("content", "").strip()
 
-        header = f"[CHUNK {i} | TYPE: {chunk_type} | Page {page}"
-        if heading:
-            header += f" | Section: {heading[:60]}"
-        header += f" | Score: {score}]"
+        header = f"[Excerpt {i} | Source: {source}, page {page}]"
 
         lines.append(f"{header}\n{content}")
 
@@ -830,44 +836,82 @@ def build_context_block(chunks: list[dict]) -> tuple[str, str]:
 # SYNTHESIS PROMPT  (explanation intent — research-grade output)
 # ─────────────────────────────────────────────────────────────────────────────
 
-SYNTHESIS_SYSTEM = """You are a high-precision RAG answer generator.
+SYNTHESIS_SYSTEM = """You are an advanced RAG assistant. Follow every rule below. No exceptions.
 
-Your job is to produce consistent, well-structured, research-grade answers from retrieved
-documents while maintaining flexibility across different question types.
+━━━ CONTEXT AWARENESS ━━━
+- Always use prior conversation turns.
+- Resolve "it", "this", "they" from earlier answers — never ask for clarification.
+- DO NOT redefine any concept already explained in history.
+- If referencing a prior concept, your FIRST SENTENCE must be one of:
+    "As explained earlier,"
+    "Building on the previous concept,"
+    "As discussed above,"
+  Skipping this on a follow-up is INCORRECT BEHAVIOR.
 
-SYNTHESIS RULES:
-- Read ALL chunks collectively before writing — produce ONE unified explanation
-- Do NOT copy sentences verbatim — synthesize and paraphrase
-- Do NOT reference chunk numbers or say "according to chunk X"
-- If partial info exists, use it — never say "not enough information"
-- Merge overlapping ideas from multiple chunks into single explanations
-- Remove redundancy aggressively
+━━━ CITATIONS (MANDATORY) ━━━
+- Every factual statement must cite its source:
+    [Excerpt X | Source: <exact filename>, page Y]
+- Use the most relevant chunk number (X) from the provided context.
+- Multiple citations allowed per claim.
+- No vague labels like "paper" or "document".
+- If no source supports the claim: "Not found in provided documents."
 
-STANDARD ANSWER FLOW (follow this logical order, skip irrelevant sections silently):
-  Definition → Mechanism → Key Points → Formula → Intuition → Importance
+━━━ FORMULA RULE ━━━
+- If the topic involves attention, transformers, probability, or any mathematical concept:
+  You MUST include the relevant formula on its own line.
+  Example: Attention(Q,K,V) = softmax(QKᵀ / √d_k)V
+  Then explain each variable in one sentence.
 
-FLEXIBILITY RULE:
-- NOT every section must appear in every answer
-- DO NOT write "not applicable" for skipped sections — just omit them
-- Adapt depth based on question complexity
-- Do NOT enforce identical formatting — keep style semi-consistent, not identical
+━━━ OUTPUT FORMAT ━━━
+Use ONLY sections that apply. Never force empty sections. Use this EXACT structure:
 
-CITATION RULE (consistent throughout):
-- Attach [Source | Page X] to every factual claim
-- Use ONLY this format — never mix with [1], [Excerpt N], or filename formats
+🧠 **Answer**
+[Direct grounded answer. Cite every factual claim: [Excerpt X | Source: <filename>, page Y]]
 
-LENGTH:
-- 150–300 words unless the topic genuinely requires more
-- Key points section: max 4–6 bullets
-- No paragraph repetition
+💡 **Key Idea**
+[1–2 sentence intuition — always include]
 
-FORMULA RULE:
-- If a formula is in the context, include it on its own line
-- Explain variables in one brief sentence
+⚙️ **How It Works** (optional — include only if question asks about application/integration)
+- **Where:** where this is used in the pipeline or system
+- **Why:** why it improves or matters
+- **How:** how it integrates technically
 
-STYLE GOAL:
-✔ Research assistant — textbook clarity — compact synthesis
-✗ Not a verbose dump — not raw chunk stitching"""
+🧮 **Formula** (include if topic involves attention, transformers, probability, or math)
+[formula on its own line, then one sentence explaining variables]
+
+📚 **Sources**
+[List all citations used, one per line]
+
+FORMATTING RULES:
+- After every section heading (🧠 **Answer**, 💡 **Key Idea**, etc.) ALWAYS start content on the NEXT line
+- Add a blank line between every section
+- Bold all sub-labels (**Where:**, **Why:**, **How:**)
+- Never put heading and text on the same line
+
+━━━ HALLUCINATION CONTROL ━━━
+- NEVER assume anything not explicitly in the context.
+- Do NOT invent tools, models, metrics, or project details.
+- If uncertain: "Not explicitly mentioned in the provided documents."
+- DIAGRAMS: Do NOT describe, sketch, or infer a diagram in text if no actual
+  image was provided to you. If the user asks for a diagram and none is in
+  context, say exactly: "No diagram found in the indexed documents."
+  Never write "the architecture consists of…" as a substitute for a diagram.
+
+━━━ CONTRADICTION GUARD ━━━
+- Check conversation history before responding.
+- If a prior answer said YES → do not answer NO to the same question.
+- If a conflict exists: "Note: this may conflict with the earlier answer — [reason]."
+
+━━━ CONCISENESS ━━━
+- Max 150 words. No repetition. No padding.
+- For lists: max 2–3 most relevant items. Never dump full lists.
+
+━━━ OUT OF SCOPE ━━━
+- If the question is unrelated to the documents:
+    "Not found in provided documents."
+
+━━━ CONSISTENCY ━━━
+- Same tone and format across all answers. No random style switches."""
 
 SYNTHESIS_USER = """Context (read ALL chunks before answering):
 
@@ -985,26 +1029,34 @@ def _validate_coverage(answer: str, query: str) -> tuple[bool, list[str]]:
     # except Exception as e:
     #     return f"**Answer:** Error generating response — {e}\n\n**Confidence:** LOW"
 
-def answer(query: str, chunks: list[dict], intent: str = "explanation") -> str:
+def answer(
+    query:   str,
+    chunks:  list[dict],
+    intent:  str        = "explanation",
+    history: list[dict] = None,
+) -> str:
     """
-    Intent-aware answering with two distinct generation strategies:
+    Intent-aware answering with two distinct generation strategies.
 
     explanation → SYNTHESIS PATH
-        Produces a structured, synthesized research-grade answer.
-        No inline citations. Reads all chunks collectively.
-        Coverage check + one targeted retry if topics are missing.
+        Structured, synthesized research-grade answer.
+        Conversation history injected as real LLM turns so the model
+        can reference prior explanations instead of restating them.
 
     lookup / boolean / comparison / aggregation → GROUNDED PATH
         Precise, extractive, citation-grounded answers.
-        Each factual claim cites its source chunk.
+
+    history: list of {"role": "user"|"assistant", "content": str}
+        Last N turns from the conversation (trimmed by caller).
+        Passed as real messages so the LLM natively understands context.
     """
     if not chunks:
+        # The caller may have appended an image_note to query — honour it
+        if "[System note:" in query and "Visual References" in query:
+            return "🧠 **Answer**\nSee the Visual References section below for the diagram."
         return (
-            "**Answer:** No relevant information found in the ingested "
-            "documents for this question.\n\n"
-            "**Confidence:** LOW\n\n"
-            "**Gaps:** The query appears to be outside the scope of "
-            "the available documents."
+            "🧠 **Answer**\nNo relevant information found in the ingested documents "
+            "for this question."
         )
 
     context_block, context_quality = build_context_block(chunks)
@@ -1016,20 +1068,23 @@ def answer(query: str, chunks: list[dict], intent: str = "explanation") -> str:
 
     # ── SYNTHESIS PATH ────────────────────────────────────────────────────────
     if intent == "explanation":
+        cache_key = (query, intent, bool(history))
+        if cache_key in _answer_cache:
+            print("  [Answer] Cache hit — skipping LLM call")
+            return _answer_cache[cache_key]
+
         user_message = SYNTHESIS_USER.format(
-            context_block=context_block,
+            context_block=context_block[:2000],
             query=query,
         )
+        prior_turns = (history or [])[-6:]
+        messages = [
+            {"role": "system", "content": SYNTHESIS_SYSTEM},
+            *prior_turns,
+            {"role": "user", "content": user_message},
+        ]
         try:
-            first_answer = _groq().chat.completions.create(
-                model=MODEL,
-                messages=[
-                    {"role": "system", "content": SYNTHESIS_SYSTEM},
-                    {"role": "user",   "content": user_message},
-                ],
-                temperature=0.0,
-                max_tokens=2000,
-            ).choices[0].message.content.strip()
+            first_answer = _groq_complete(messages, temperature=0.0, max_tokens=2000)
 
             covered, missing = _validate_coverage(first_answer, query)
             if not covered:
@@ -1039,19 +1094,18 @@ def answer(query: str, chunks: list[dict], intent: str = "explanation") -> str:
                     f"Extend your answer to explicitly cover them. "
                     f"Use ONLY the provided context."
                 )
-                first_answer = _groq().chat.completions.create(
-                    model=MODEL,
+                first_answer = _groq_complete(
                     messages=[
-                        {"role": "system", "content": SYNTHESIS_SYSTEM},
-                        {"role": "user",   "content": user_message},
+                        *messages,
                         {"role": "assistant", "content": first_answer},
-                        {"role": "user",   "content": retry_msg},
+                        {"role": "user",      "content": retry_msg},
                     ],
                     temperature=0.0,
-                    max_tokens=2000,
-                ).choices[0].message.content.strip()
+                    max_tokens=512,
+                )
                 print("  [Coverage] Retry complete")
 
+            _answer_cache[cache_key] = first_answer
             return first_answer
 
         except Exception as e:
@@ -1095,7 +1149,7 @@ def answer(query: str, chunks: list[dict], intent: str = "explanation") -> str:
         "RULES:\n"
         "- Use ONLY information from the provided context\n"
         "- NEVER use external knowledge or guess\n"
-        "- After every factual claim, cite: [Chunk N | Page X]\n"
+        "- After every factual claim, cite: [Excerpt X | Source: <exact filename>, page Y]\n"
         f"- Context quality: {context_quality}\n\n"
         f"INTENT: {intent}\n"
         f"BEHAVIOR:\n{intent_rules}\n"
@@ -1107,15 +1161,21 @@ def answer(query: str, chunks: list[dict], intent: str = "explanation") -> str:
         query=query,
     )
 
+    cache_key = (query, intent, bool(history))
+    if cache_key in _answer_cache:
+        print("  [Answer] Cache hit — skipping LLM call")
+        return _answer_cache[cache_key]
+
     try:
-        return _groq().chat.completions.create(
-            model=MODEL,
+        result = _groq_complete(
             messages=[
                 {"role": "system", "content": system_message},
                 {"role": "user",   "content": user_message},
             ],
             temperature=0.0,
             max_tokens=1024,
-        ).choices[0].message.content.strip()
+        )
+        _answer_cache[cache_key] = result
+        return result
     except Exception as e:
         return f"**Answer:** Error — {e}\n\n**Confidence:** LOW"
