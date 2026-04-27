@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { Send, User, ChevronDown, ChevronUp, FileText } from 'lucide-react'
+import { Send, User, ChevronDown, ChevronUp, FileText, Maximize2, X } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import toast from 'react-hot-toast'
 
@@ -308,34 +308,89 @@ function PipelineInfo({ message }) {
 }
 
 
-/* ── Image panel ──────────────────────────────────────────── */
+/* ── Image panel with lightbox ────────────────────────────── */
 function ImagePanel({ images }) {
+  const [lightbox, setLightbox] = useState(null)
+
+  useEffect(() => {
+    if (!lightbox) return
+    const onKey = (e) => { if (e.key === 'Escape') setLightbox(null) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [lightbox])
+
   return (
-    <div className="mt-3 space-y-2">
-      <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider ml-1">
-        🖼️ Visual References
-      </p>
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        {images.map((img) => (
-          <div key={img.image_id} className="glass-subtle rounded-xl overflow-hidden">
-            <img
-              src={`http://localhost:8000${img.url}`}
-              alt={img.caption || img.image_id}
-              className="w-full object-contain max-h-52 bg-dark-900"
-              onError={(e) => { e.currentTarget.style.display = 'none' }}
-            />
-            <div className="px-3 py-2 space-y-0.5">
-              {img.caption && (
-                <p className="text-xs text-gray-300 leading-snug">{img.caption}</p>
+    <>
+      <div className="mt-3 space-y-2">
+        <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider ml-1">
+          Visual References
+        </p>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {images.map((img) => (
+            <button
+              key={img.image_id}
+              onClick={() => setLightbox(img)}
+              className="glass-subtle rounded-xl overflow-hidden text-left group hover:border-accent/40 transition-all duration-200"
+            >
+              <div className="relative bg-white/[0.03] flex items-center justify-center min-h-[120px]">
+                <img
+                  src={`http://localhost:8000${img.url}`}
+                  alt={img.caption || img.image_id}
+                  className="w-full object-contain max-h-52"
+                  onError={(e) => { e.currentTarget.closest('button').style.display = 'none' }}
+                />
+                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-center justify-center">
+                  <Maximize2 className="w-5 h-5 text-white opacity-0 group-hover:opacity-100 transition-opacity drop-shadow" />
+                </div>
+              </div>
+              {(img.caption || img.source) && (
+                <div className="px-3 py-2 space-y-0.5 border-t border-white/[0.05]">
+                  {img.caption && (
+                    <p className="text-xs text-gray-300 leading-snug line-clamp-2">{img.caption}</p>
+                  )}
+                  <p className="text-[11px] text-gray-500">{img.source} · p.{img.page}</p>
+                </div>
               )}
-              <p className="text-[11px] text-gray-500">
-                {img.source} · p.{img.page}
-              </p>
-            </div>
-          </div>
-        ))}
+            </button>
+          ))}
+        </div>
       </div>
-    </div>
+
+      {/* Lightbox overlay */}
+      {lightbox && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/75 backdrop-blur-sm animate-fade-in"
+          onClick={() => setLightbox(null)}
+        >
+          <div
+            className="relative max-w-4xl w-full glass rounded-2xl overflow-hidden shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={() => setLightbox(null)}
+              className="absolute top-3 right-3 z-10 p-1.5 rounded-lg bg-dark-700/80 text-gray-400 hover:text-white hover:bg-dark-600 transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+            <div className="bg-white/[0.03] flex items-center justify-center p-4">
+              <img
+                src={`http://localhost:8000${lightbox.url}`}
+                alt={lightbox.caption || lightbox.image_id}
+                className="max-w-full max-h-[75vh] object-contain"
+              />
+            </div>
+            {(lightbox.caption || lightbox.source) && (
+              <div className="px-5 py-3 border-t border-white/[0.06]">
+                {lightbox.caption && (
+                  <p className="text-sm text-gray-300 leading-snug">{lightbox.caption}</p>
+                )}
+                <p className="text-xs text-gray-500 mt-0.5">{lightbox.source} · p.{lightbox.page}</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </>
   )
 }
 

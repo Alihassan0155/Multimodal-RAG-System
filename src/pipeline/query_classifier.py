@@ -57,7 +57,7 @@ def _groq() -> Groq:
 # Retrieval config per intent type
 INTENT_CONFIGS = {
     "lookup": {
-        "top_k":          3,
+        "top_k":          5,
         "threshold":      -8.0,
         "expand_queries": True,
         "description":    "Precise fact retrieval",

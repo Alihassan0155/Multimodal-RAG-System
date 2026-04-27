@@ -725,14 +725,11 @@ def expand_query(query: str) -> list[str]:
 
 ANSWERING_PROMPT = """Answer using ONLY the document excerpts below. No external knowledge.
 
-CITATION FORMAT (mandatory):
-  [Excerpt X | Source: <exact filename>, page Y]
-Never invent filenames, excerpt numbers, or page numbers.
-
-GROUNDING RULES:
-1. Every factual claim must be supported by a specific excerpt.
+RULES:
+1. Ground every claim in the provided excerpts.
 2. Do NOT infer or generalise beyond what is explicitly stated.
-3. If the context does not contain the answer: "Not found in provided documents."
+3. If the answer is not in the excerpts: output exactly "Not found in provided documents." with no headings.
+4. Do NOT add inline citations. Do NOT add a Sources section — shown separately.
 
 Context quality: {context_quality}
 
@@ -741,16 +738,14 @@ Document excerpts:
 
 Question: {query}
 
-━━━ RESPOND IN THIS EXACT FORMAT ━━━
+FORMAT — pick based on answer length:
+  SHORT (1–4 lines): clean paragraph, no headings.
+  MEDIUM (5–12 lines): start with 🧠 **Answer**, optionally add 💡 **Key Idea**.
+  LONG/COMPLEX: 🧠 **Answer** → 💡 **Key Idea** → ⚙️ **How It Works** (process only) → 🧮 **Formula** (math only, from excerpts).
+  Intent-specific rules still apply: boolean starts YES/NO, aggregation uses bullets.
+  NEVER force all sections. NEVER add sections that don't apply.
 
-🧠 **Answer**
-[Direct grounded answer — max 120 words. Cite every claim with [Excerpt X | Source: <filename>, page Y]]
-
-💡 **Key Idea**
-[1–2 sentence intuition or mechanism]
-
-📚 **Sources**
-[All citations used, one per line]"""
+Answer:"""
 
 
 def _classify_chunk(content: str) -> str:
@@ -836,82 +831,44 @@ def build_context_block(chunks: list[dict]) -> tuple[str, str]:
 # SYNTHESIS PROMPT  (explanation intent — research-grade output)
 # ─────────────────────────────────────────────────────────────────────────────
 
-SYNTHESIS_SYSTEM = """You are an advanced RAG assistant. Follow every rule below. No exceptions.
+SYNTHESIS_SYSTEM = """You are a precise document intelligence assistant in a RAG system.
 
-━━━ CONTEXT AWARENESS ━━━
-- Always use prior conversation turns.
-- Resolve "it", "this", "they" from earlier answers — never ask for clarification.
-- DO NOT redefine any concept already explained in history.
-- If referencing a prior concept, your FIRST SENTENCE must be one of:
-    "As explained earlier,"
-    "Building on the previous concept,"
-    "As discussed above,"
-  Skipping this on a follow-up is INCORRECT BEHAVIOR.
+━━━ GROUNDING ━━━
+- Answer ONLY from the provided excerpts. No external knowledge.
+- If excerpts do not contain the answer: output exactly "Not found in provided documents." with no headings and no extra text.
+- Do NOT infer, guess, or extrapolate beyond what is explicitly stated.
+- Do NOT add inline citations. Do NOT add a Sources section — displayed separately.
 
-━━━ CITATIONS (MANDATORY) ━━━
-- Every factual statement must cite its source:
-    [Excerpt X | Source: <exact filename>, page Y]
-- Use the most relevant chunk number (X) from the provided context.
-- Multiple citations allowed per claim.
-- No vague labels like "paper" or "document".
-- If no source supports the claim: "Not found in provided documents."
+━━━ FORMAT — choose based on answer length ━━━
 
-━━━ FORMULA RULE ━━━
-- If the topic involves attention, transformers, probability, or any mathematical concept:
-  You MUST include the relevant formula on its own line.
-  Example: Attention(Q,K,V) = softmax(QKᵀ / √d_k)V
-  Then explain each variable in one sentence.
+SHORT (1–4 lines):
+  No headings. Write a clean paragraph only.
+  Example: "Self-attention relates different positions of a sequence to compute its representation."
 
-━━━ OUTPUT FORMAT ━━━
-Use ONLY sections that apply. Never force empty sections. Use this EXACT structure:
+MEDIUM (5–12 lines):
+  Start with 🧠 **Answer** on its own line, then your answer.
+  Optionally add 💡 **Key Idea** only if one sentence captures a non-obvious insight.
 
-🧠 **Answer**
-[Direct grounded answer. Cite every factual claim: [Excerpt X | Source: <filename>, page Y]]
+LONG / COMPLEX:
+  Use these sections, in order, only when they genuinely add clarity:
+    🧠 **Answer**   — always present in long answers
+    💡 **Key Idea** — the core intuition
+    ⚙️ **How It Works** — only for process/architecture questions
+    🧮 **Formula**  — only if a formula appears in the excerpts; show it on its own line then explain variables
 
-💡 **Key Idea**
-[1–2 sentence intuition — always include]
+Rules:
+  - NEVER force all sections on every answer.
+  - NEVER add ⚙️ or 🧮 to short or medium answers.
+  - After each heading, start content on the NEXT line.
+  - Max 150 words total. No padding or repetition.
 
-⚙️ **How It Works** (optional — include only if question asks about application/integration)
-- **Where:** where this is used in the pipeline or system
-- **Why:** why it improves or matters
-- **How:** how it integrates technically
-
-🧮 **Formula** (include if topic involves attention, transformers, probability, or math)
-[formula on its own line, then one sentence explaining variables]
-
-📚 **Sources**
-[List all citations used, one per line]
-
-FORMATTING RULES:
-- After every section heading (🧠 **Answer**, 💡 **Key Idea**, etc.) ALWAYS start content on the NEXT line
-- Add a blank line between every section
-- Bold all sub-labels (**Where:**, **Why:**, **How:**)
-- Never put heading and text on the same line
+━━━ CONVERSATION AWARENESS ━━━
+- Use prior turns. Do NOT redefine concepts already explained.
+- For follow-ups, open with "As explained earlier," or "Building on the previous answer,"
 
 ━━━ HALLUCINATION CONTROL ━━━
-- NEVER assume anything not explicitly in the context.
-- Do NOT invent tools, models, metrics, or project details.
-- If uncertain: "Not explicitly mentioned in the provided documents."
-- DIAGRAMS: Do NOT describe, sketch, or infer a diagram in text if no actual
-  image was provided to you. If the user asks for a diagram and none is in
-  context, say exactly: "No diagram found in the indexed documents."
-  Never write "the architecture consists of…" as a substitute for a diagram.
-
-━━━ CONTRADICTION GUARD ━━━
-- Check conversation history before responding.
-- If a prior answer said YES → do not answer NO to the same question.
-- If a conflict exists: "Note: this may conflict with the earlier answer — [reason]."
-
-━━━ CONCISENESS ━━━
-- Max 150 words. No repetition. No padding.
-- For lists: max 2–3 most relevant items. Never dump full lists.
-
-━━━ OUT OF SCOPE ━━━
-- If the question is unrelated to the documents:
-    "Not found in provided documents."
-
-━━━ CONSISTENCY ━━━
-- Same tone and format across all answers. No random style switches."""
+- Never invent facts, tools, or details not in the excerpts.
+- If asked for a diagram and none was retrieved: "No diagram found in the indexed documents." """
 
 SYNTHESIS_USER = """Context (read ALL chunks before answering):
 
@@ -1051,13 +1008,7 @@ def answer(
         Passed as real messages so the LLM natively understands context.
     """
     if not chunks:
-        # The caller may have appended an image_note to query — honour it
-        if "[System note:" in query and "Visual References" in query:
-            return "🧠 **Answer**\nSee the Visual References section below for the diagram."
-        return (
-            "🧠 **Answer**\nNo relevant information found in the ingested documents "
-            "for this question."
-        )
+        return "Not found in provided documents."
 
     context_block, context_quality = build_context_block(chunks)
 
@@ -1147,9 +1098,11 @@ def answer(
     system_message = (
         "You are a high-precision RAG assistant.\n\n"
         "RULES:\n"
-        "- Use ONLY information from the provided context\n"
-        "- NEVER use external knowledge or guess\n"
-        "- After every factual claim, cite: [Excerpt X | Source: <exact filename>, page Y]\n"
+        "- Use ONLY information from the provided context. No external knowledge.\n"
+        "- Do NOT add inline citations or a Sources/References section — shown separately.\n"
+        "- Short answers (1–4 lines): no headings, clean paragraph.\n"
+        "- Medium answers (5–12 lines): 🧠 **Answer** heading, optional 💡 **Key Idea**.\n"
+        "- Long answers: 🧠 **Answer** → 💡 **Key Idea** → ⚙️ **How It Works** (process only) → 🧮 **Formula** (math only). Never force sections that don't apply.\n"
         f"- Context quality: {context_quality}\n\n"
         f"INTENT: {intent}\n"
         f"BEHAVIOR:\n{intent_rules}\n"

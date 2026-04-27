@@ -190,6 +190,20 @@ _MEDIUM_VISUAL = {"architecture", "structure", "design", "layout", "flow", "over
 _STRONG_THRESHOLD = 0.25   # lower bar — user explicitly asked for a visual
 _MEDIUM_THRESHOLD = 0.35   # higher bar — image must be highly relevant to be shown
 
+# Phrases the LLM emits when it finds no supporting evidence in the context.
+# When any marker appears in the answer, sources and images are stripped.
+_NO_EVIDENCE_MARKERS = (
+    "not found in provided documents",
+    "not found in the provided",
+    "not explicitly mentioned",
+    "not mentioned in the",
+    "no relevant information",
+    "not available in the",
+    "cannot find",
+    "not present in the",
+    "outside the scope",
+)
+
 
 def _visual_intent(query: str) -> str:
     """Return 'strong', 'medium', or 'none' based on query keywords."""
@@ -268,7 +282,12 @@ def _run_query(question: str, history: list[dict] = None):
         history=history,
     )
 
-    sources = [
+    # Grounding gate: if the LLM found no evidence, strip sources and images.
+    no_evidence = any(m in response_text.lower() for m in _NO_EVIDENCE_MARKERS)
+    if no_evidence:
+        images = []
+
+    sources = [] if no_evidence else [
         {
             "source":          c.get("source", "unknown"),
             "page":            c.get("page", "?"),

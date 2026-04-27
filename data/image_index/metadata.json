@@ -1,31 +1,31 @@
 [
   {
-    "image_id": "86857da1_p3_x94",
-    "image_path": "D:\\Projects\\Multimodal-rag\\data\\extracted\\images\\86857da1_p3_x94.png",
-    "image_filename": "86857da1_p3_x94.png",
+    "image_id": "75ac7d52_p3_x94",
+    "image_path": "D:\\Projects\\Multimodal-rag\\data\\extracted\\images\\75ac7d52_p3_x94.png",
+    "image_filename": "75ac7d52_p3_x94.png",
     "page": 3,
-    "doc_id": "86857da1",
-    "source": "Attention-is-all-you-need.pdf",
+    "doc_id": "75ac7d52",
+    "source": "Attention Is All You Need.pdf",
     "caption": "Figure 1: The Transformer - model architecture.",
     "context": "Figure 1: The Transformer - model architecture.\nwise fully connected feed-forward network. We employ a residual connection [10] around each of\nthe two sub-layers, followed by layer normalization [1]. That is, the output of each sub-layer is\nLayerNorm(x + Sublayer(x)), where Sublayer(x) is the function implemented by the sub-layer\nitself. To facilitate these residual connections, all sub-layers in the model, as well as the embedding\nlayers, produce outputs of dimension dmodel = 512.\nDecoder:\nThe "
   },
   {
-    "image_id": "86857da1_p4_x102",
-    "image_path": "D:\\Projects\\Multimodal-rag\\data\\extracted\\images\\86857da1_p4_x102.png",
-    "image_filename": "86857da1_p4_x102.png",
+    "image_id": "75ac7d52_p4_x102",
+    "image_path": "D:\\Projects\\Multimodal-rag\\data\\extracted\\images\\75ac7d52_p4_x102.png",
+    "image_filename": "75ac7d52_p4_x102.png",
     "page": 4,
-    "doc_id": "86857da1",
-    "source": "Attention-is-all-you-need.pdf",
+    "doc_id": "75ac7d52",
+    "source": "Attention Is All You Need.pdf",
     "caption": "Figure 2: (left) Scaled Dot-Product Attention. (right) Multi-Head Attention consists of several",
     "context": "Scaled Dot-Product Attention\nMulti-Head Attention\nFigure 2: (left) Scaled Dot-Product Attention. (right) Multi-Head Attention consists of several\nattention layers running in parallel.\nquery with all keys, divide each by √dk, and apply a softmax function to obtain the weights on the\nvalues.\nIn practice, we compute the attention function on a set of queries simultaneously, packed together\ninto a matrix Q. The keys and values are also packed together into matrices K and V . We compute\nthe matrix of"
   },
   {
-    "image_id": "86857da1_p4_x104",
-    "image_path": "D:\\Projects\\Multimodal-rag\\data\\extracted\\images\\86857da1_p4_x104.png",
-    "image_filename": "86857da1_p4_x104.png",
+    "image_id": "75ac7d52_p4_x104",
+    "image_path": "D:\\Projects\\Multimodal-rag\\data\\extracted\\images\\75ac7d52_p4_x104.png",
+    "image_filename": "75ac7d52_p4_x104.png",
     "page": 4,
-    "doc_id": "86857da1",
-    "source": "Attention-is-all-you-need.pdf",
+    "doc_id": "75ac7d52",
+    "source": "Attention Is All You Need.pdf",
     "caption": "Figure 2: (left) Scaled Dot-Product Attention. (right) Multi-Head Attention consists of several",
     "context": "Scaled Dot-Product Attention\nMulti-Head Attention\nFigure 2: (left) Scaled Dot-Product Attention. (right) Multi-Head Attention consists of several\nattention layers running in parallel.\nquery with all keys, divide each by √dk, and apply a softmax function to obtain the weights on the\nvalues.\nIn practice, we compute the attention function on a set of queries simultaneously, packed together\ninto a matrix Q. The keys and values are also packed together into matrices K and V . We compute\nthe matrix of"
   }
